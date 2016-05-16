@@ -161,8 +161,14 @@ public class NeuralNetWorkModel implements Writable{
      */
     public Vector predict(Vector features){
         Vector outputUnitInputs = outPutUnitInput(features);
-        outputUnitInputs.assign(Functions.EXP);
-        return outputUnitInputs.divide(outputUnitInputs.zSum());
+        return outputUnitInputs.assign(new DoubleFunction() {
+            @Override
+            public double apply(double x) {
+                return 1.0/(1 + Math.exp(-x));
+            }
+        });
+//        outputUnitInputs.assign(Functions.EXP);
+//        return outputUnitInputs.divide(outputUnitInputs.zSum());
     }
     /**
      * 返回预测概率值最大的那个类别.
@@ -203,7 +209,7 @@ public class NeuralNetWorkModel implements Writable{
         for(int i = 0; i < row; i++){
             Vector vector = new DenseVector(column);
             for(int j = 0; j < column; j++)
-                vector.set(j,random.nextFloat());
+                vector.set(j,random.nextDouble() - 0.5);
             matrix.assignRow(i, vector);
         }
         return matrix;

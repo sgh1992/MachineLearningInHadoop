@@ -8,8 +8,11 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.mahout.classifier.mlp.NeuralNetworkFunctions;
 import org.apache.mahout.math.*;
+import org.apache.mahout.math.function.DoubleDoubleFunction;
 import org.apache.mahout.math.function.DoubleFunction;
+import org.apache.mahout.math.function.Functions;
 
 import java.io.BufferedReader;
 import java.io.EOFException;
@@ -19,6 +22,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Random;
+
+import static tool.Tool.labelIndex;
+import static tool.Tool.paths;
 
 /**
  * Created by sghipr on 5/11/16.
@@ -96,8 +102,8 @@ public class TrainNeuralNetWork extends Classify{
         List<Path> trainPaths = new ArrayList<>();
         try {
             labelPath = NeuralNetWorkJob.runLabelIndexJob(conf,files);
-            labelMap = labelIndex(labelPath);
-            paths(files,trainPaths);
+            labelMap = labelIndex(labelPath,conf);
+            paths(files,trainPaths,conf);
         } catch (IOException e) {
             e.printStackTrace();
         } catch (ClassNotFoundException e) {
@@ -110,11 +116,10 @@ public class TrainNeuralNetWork extends Classify{
         boolean initilizeFlag = true;
 
         int iters = 0;
-        double sumErrors = 10000;
-        Random random = new Random(17);
+        int totalCount = 0;
         while (iters++ < maxIters){
-            sumErrors = 0.0;
             int count = 0;
+            totalCount = 0;
             for(Path path : trainPaths) {
                 try {
                     reader = new SequenceFile.Reader(FileSystem.get(conf), path, conf);
@@ -130,6 +135,7 @@ public class TrainNeuralNetWork extends Classify{
                         boolean success = trainByErrorBP(label.toString(), features.get());
                         if(success)
                             count++;
+                        totalCount++;
                     }
                     reader.close();
                 } catch (EOFException e) {
@@ -138,7 +144,7 @@ public class TrainNeuralNetWork extends Classify{
                     e.printStackTrace();
                 }
             }
-            System.err.printf("Iters:%d,sumErrors:%d\n", iters, count);
+            System.err.printf("Iters:%d,precise:%f\n", iters, count/(totalCount + 1.0));
         }
     }
     /**
@@ -158,120 +164,148 @@ public class TrainNeuralNetWork extends Classify{
 
         //something named ak,ignored
         //yk same as zk
-        Vector yk = netWorkModel.predict(features);
-
+        final Vector yk = netWorkModel.predict(features);
         Vector target = new DenseVector(labelMap.size());
         target.set(labelMap.get(label), 1.0);
-        Vector derivateAk = yk.minus(target);//yk - tk
-        Vector derivateAj = getDerivateAJ(Zj, derivateAk);
 
-        //初始化连接输入层与隐藏层的权重的偏导数值.
-        Matrix derivateWeightConnectInputAndHiddenMatrix = new DenseMatrix(netWorkModel.getM(), netWorkModel.getInputUnits() + 1);
-        for(int j = 0; j < derivateWeightConnectInputAndHiddenMatrix.rowSize(); j++)
-            derivateWeightConnectInputAndHiddenMatrix.viewRow(j).assign(derivateAj.get(j));
-
-        //初始化连接隐藏层与输出层的权重的偏导数值.
-        Matrix derivateWeightConnectHiddenAndOutPutMatrix = new DenseMatrix(labelMap.size(), netWorkModel.getM() + 1);
-        for(int k = 0; k < derivateWeightConnectHiddenAndOutPutMatrix.rowSize(); k++)
-            derivateWeightConnectHiddenAndOutPutMatrix.viewRow(k).assign(derivateAk.get(k));
-
-        //由于隐藏层与输出层之间增加了一个bais的新增节点，而输入层与隐藏层的bais节点之间又没有联系.
-        //因此，这里需要区分开来.
-        Vector newFeatures = new DenseVector(netWorkModel.getInputUnits() + 1);
-        newFeatures.set(0, 1.0);
-        newFeatures.viewPart(1,netWorkModel.getInputUnits());
-        derivateWeightConnectInputAndHiddenMatrix = derivateWeightsConnectLayers(derivateWeightConnectInputAndHiddenMatrix, newFeatures);
-        Vector newZj = new DenseVector(netWorkModel.getM() + 1);
-        newZj.set(0, 1.0);
-        newZj.viewPart(1, netWorkModel.getM()).assign(Zj);
-        derivateWeightConnectHiddenAndOutPutMatrix = derivateWeightsConnectLayers(derivateWeightConnectHiddenAndOutPutMatrix, newZj);
-        updateModel(derivateWeightConnectInputAndHiddenMatrix, derivateWeightConnectHiddenAndOutPutMatrix);
-//        return derivateAk.assign(new DoubleFunction() {
-//            @Override
-//            public double apply(double x) {
-//                return Math.abs(x);
-//            }
-//        }).zSum();
-        return labelMap.get(label) == yk.maxValueIndex();
-    }
-
-    public void updateModel(Matrix derivateWeightConnectInputAndHiddenMatrix, Matrix derivateWeightConnectHiddenAndOutPutMatrix){
-        updateWeight(netWorkModel.getFirstLayerWeights(), derivateWeightConnectInputAndHiddenMatrix, lambda1);
-        updateWeight(netWorkModel.getSecondLayerWeights(), derivateWeightConnectHiddenAndOutPutMatrix, lambda2);
-    }
-
-    /**更新权值.
-     * @param layerWeights
-     * @param derivateWeightConnectLayers
-     * @param lambda
-     */
-    public void updateWeight(Matrix layerWeights, Matrix derivateWeightConnectLayers, double lambda){
-        for(int row = 0; row < layerWeights.rowSize(); row++){
-            Vector vector = layerWeights.viewRow(row).times(lambda);
-            vector = (vector.plus(derivateWeightConnectLayers.viewRow(row))).times(learningRate);
-            layerWeights.assignRow(row,layerWeights.viewRow(row).minus(vector));
-        }
-    }
-    /**
-     * 根据BP反向传播算法获得其En对隐藏层中aj的偏导数.
-     * d(En/aj) = h'(aj) * sum(d(En/ak) * wkj) k = 1,2,...outputUnitNums;
-     * @param Zj
-     * @param derivateAK
-     * @return
-     */
-    public Vector getDerivateAJ(Vector Zj, Vector derivateAK){
-
-        //h'(aj) = h(aj) * (1 - h(aj)) = zj * ( 1 - zj)
-        Vector derivateOfActivation = Zj.times(new DenseVector(netWorkModel.getM()).assign(1.0).minus(Zj));
-
-        //sum(d(En/ak) * wkj)
-        Vector fp = new DenseVector(netWorkModel.getM());
-        for(int j = 0; j < fp.size(); j++){
-            fp.set(j,(netWorkModel.getSecondLayerWeights().viewColumn(j).times(derivateAK)).zSum());
-        }
-        return derivateOfActivation.times(fp);
-    }
-
-    /**
-     * 计算En对权重Wji的偏导数.用于SGD.
-     * 注意这个结果是个矩阵.
-     * d(E/Wji) = d(E/aj) * d(aj/Wji);
-     * @param derivateA d(E/aj)
-     * @param Z  d(aj/Wji)
-     * @return
-     */
-    public Matrix derivateWeightsConnectLayers(Matrix derivateA, Vector Z){
-
-        for(int row = 0; row < derivateA.rowSize(); row++)
-            derivateA.assignRow(row,derivateA.viewRow(row).times(Z));
-        return derivateA;
-    }
-
-    public HashMap<String,Integer> labelIndex(Path labelPath) throws IOException {
-        HashMap<String,Integer> labelMap = new HashMap<>();
-        BufferedReader reader = null;
-        List<Path> listPaths = new ArrayList<>();
-        paths(labelPath,listPaths);
-        FileSystem fs = FileSystem.get(conf);
-        for(Path path : listPaths){
-            reader = new BufferedReader(new InputStreamReader(fs.open(path)));
-            String str = null;
-            while((str = reader.readLine()) != null){
-                if(!labelMap.containsKey(str.trim()))
-                    labelMap.put(str.trim(),labelMap.size());
+        Vector derivateAk = target.assign(yk, NeuralNetworkFunctions.derivativeCrossEntropy);
+        derivateAk = derivateAk.assign(yk, new DoubleDoubleFunction() {
+            @Override
+            public double apply(double arg1, double arg2) {
+                return arg1 * arg2 * (1 - arg2);
             }
-            reader.close();
-        }
+        });
 
-        return labelMap;
+        Matrix[] weightUpdateMatrixs = new Matrix[2];
+        Matrix[] modelWeights = new Matrix[2];
+        modelWeights[0] = netWorkModel.getFirstLayerWeights();
+        modelWeights[1] = netWorkModel.getSecondLayerWeights();
+        double[] lambdas = {lambda1,lambda2};
+
+        weightUpdateMatrixs[0] = new DenseMatrix(netWorkModel.getFirstLayerWeights().rowSize(),netWorkModel.getFirstLayerWeights().columnSize());
+        weightUpdateMatrixs[1] = new DenseMatrix(netWorkModel.getSecondLayerWeights().rowSize(),netWorkModel.getSecondLayerWeights().columnSize());
+        Vector[] outputs = new DenseVector[2];
+        outputs[0] = features;
+        outputs[1] = Zj;
+        Vector delta = derivateAk;
+        for(int layer = 1; layer >=0 ; --layer){
+            delta = backPropagate(delta,outputs[layer],weightUpdateMatrixs[layer],modelWeights[layer]);
+        }
+        updateWeights(modelWeights,weightUpdateMatrixs,lambdas);
+        return labelMap.get(label) == yk.maxValueIndex();
+
+        //        Vector derivateAj = getDerivateAJ(Zj, derivateAk);
+//
+//        //初始化连接输入层与隐藏层的权重的偏导数值.
+//        Matrix derivateWeightConnectInputAndHiddenMatrix = new DenseMatrix(netWorkModel.getM(), netWorkModel.getInputUnits() + 1);
+//        for(int j = 0; j < derivateWeightConnectInputAndHiddenMatrix.rowSize(); j++)
+//            derivateWeightConnectInputAndHiddenMatrix.viewRow(j).assign(derivateAj.get(j));
+//
+//        //初始化连接隐藏层与输出层的权重的偏导数值.
+//        Matrix derivateWeightConnectHiddenAndOutPutMatrix = new DenseMatrix(labelMap.size(), netWorkModel.getM() + 1);
+//        for(int k = 0; k < derivateWeightConnectHiddenAndOutPutMatrix.rowSize(); k++)
+//            derivateWeightConnectHiddenAndOutPutMatrix.viewRow(k).assign(derivateAk.get(k));
+//
+//        //由于隐藏层与输出层之间增加了一个bais的新增节点，而输入层与隐藏层的bais节点之间又没有联系.
+//        //因此，这里需要区分开来.
+//        Vector newFeatures = new DenseVector(netWorkModel.getInputUnits() + 1);
+//        newFeatures.set(0, 1.0);
+//        newFeatures.viewPart(1,netWorkModel.getInputUnits()).assign(features);
+//        derivateWeightConnectInputAndHiddenMatrix = derivateWeightsConnectLayers(derivateWeightConnectInputAndHiddenMatrix, newFeatures);
+//        Vector newZj = new DenseVector(netWorkModel.getM() + 1);
+//        newZj.set(0, 1.0);
+//        newZj.viewPart(1, netWorkModel.getM()).assign(Zj);
+//        derivateWeightConnectHiddenAndOutPutMatrix = derivateWeightsConnectLayers(derivateWeightConnectHiddenAndOutPutMatrix, newZj);
+//        updateModel(derivateWeightConnectInputAndHiddenMatrix, derivateWeightConnectHiddenAndOutPutMatrix);
+////        return derivateAk.assign(new DoubleFunction() {
+////            @Override
+////            public double apply(double x) {
+////                return Math.abs(x);
+////            }
+////        }).zSum();
     }
 
-    public void paths(Path path,List<Path> listPaths) throws IOException {
-        for(FileStatus status : FileSystem.get(conf).listStatus(path)){
-            if(status.isDirectory())
-                paths(status.getPath(), listPaths);
-            else
-                listPaths.add(status.getPath());
-        }
+    public Vector backPropagate(Vector nextLayerDelta, Vector curLayerOut, Matrix weightUpdateMatrix, Matrix modelWeight){
+
+        Vector delta = curLayerOut.assign(Functions.SIGMOIDGRADIENT);
+        Vector sum = (modelWeight.transpose().times(nextLayerDelta)).viewPart(1, netWorkModel.getM());
+        delta = delta.times(sum);
+
+        Vector addBais = new DenseVector(curLayerOut.size() + 1);
+        addBais.set(0,1);
+        addBais.viewPart(1,curLayerOut.size()).assign(curLayerOut);
+
+        for(int row = 0; row < weightUpdateMatrix.rowSize(); ++row)
+            for(int column = 0; column < weightUpdateMatrix.columnSize(); ++column)
+                weightUpdateMatrix.set(row,column, nextLayerDelta.get(row) * addBais.get(column));
+        return delta;
     }
+
+    public void updateWeights(Matrix[] modelWeights,Matrix[] weightUpdateMatrixs,double[] lambdas){
+
+        for(int i = 0; i < modelWeights.length; ++i)
+            updateWeights(modelWeights[i],weightUpdateMatrixs[i],lambdas[i]);
+    }
+
+    public void updateWeights(Matrix modelWeights, Matrix updateWeights, double lambda){
+
+        for(int row = 0; row < modelWeights.rowSize(); ++row)
+            for(int column = 0; column < modelWeights.columnSize(); ++column)
+                modelWeights.set(row,column, modelWeights.get(row,column) - learningRate * (updateWeights.get(row,column) + lambda * modelWeights.get(row,column)));
+    }
+
+//    public void updateModel(Matrix derivateWeightConnectInputAndHiddenMatrix, Matrix derivateWeightConnectHiddenAndOutPutMatrix){
+//        updateWeight(netWorkModel.getFirstLayerWeights(), derivateWeightConnectInputAndHiddenMatrix, lambda1);
+//        updateWeight(netWorkModel.getSecondLayerWeights(), derivateWeightConnectHiddenAndOutPutMatrix, lambda2);
+//    }
+//
+//    /**更新权值.
+//     * @param layerWeights
+//     * @param derivateWeightConnectLayers
+//     * @param lambda
+//     */
+//    public void updateWeight(Matrix layerWeights, Matrix derivateWeightConnectLayers, double lambda){
+//        for(int row = 0; row < layerWeights.rowSize(); row++){
+//            Vector vector = layerWeights.viewRow(row).times(lambda);
+//            vector = (vector.plus(derivateWeightConnectLayers.viewRow(row))).times(learningRate);
+//            layerWeights.assignRow(row,layerWeights.viewRow(row).minus(vector));
+//        }
+//    }
+//    /**
+//     * 根据BP反向传播算法获得其En对隐藏层中aj的偏导数.
+//     * d(En/aj) = h'(aj) * sum(d(En/ak) * wkj) k = 1,2,...outputUnitNums;
+//     * @param Zj
+//     * @param derivateAK
+//     * @return
+//     */
+//    public Vector getDerivateAJ(Vector Zj, Vector derivateAK){
+//
+//        //h'(aj) = h(aj) * (1 - h(aj)) = zj * ( 1 - zj)
+//        Vector derivateOfActivation = Zj.assign(Functions.SIGMOIDGRADIENT);
+//
+//        //sum(d(En/ak) * wkj)
+//        Vector fp = netWorkModel.getSecondLayerWeights().transpose().times(derivateAK).viewPart(1,netWorkModel.getM());
+////        Vector fp = new DenseVector(netWorkModel.getM());
+////        //注意，secondLayerWeight的第0列是偏置的值.
+////        for(int j = 0; j < fp.size(); j++){
+////            //viewColumn(j + 1)
+////            fp.set(j,(netWorkModel.getSecondLayerWeights().viewColumn(j + 1).times(derivateAK)).zSum());
+////        }
+//        return derivateOfActivation.times(fp);
+//    }
+//
+//    /**
+//     * 计算En对权重Wji的偏导数.用于SGD.
+//     * 注意这个结果是个矩阵.
+//     * d(E/Wji) = d(E/aj) * d(aj/Wji);
+//     * @param derivateA d(E/aj)
+//     * @param Z  d(aj/Wji)
+//     * @return
+//     */
+//    public Matrix derivateWeightsConnectLayers(Matrix derivateA, Vector Z){
+//
+//        for(int row = 0; row < derivateA.rowSize(); row++)
+//            derivateA.assignRow(row,derivateA.viewRow(row).times(Z));
+//        return derivateA;
+//    }
 }
