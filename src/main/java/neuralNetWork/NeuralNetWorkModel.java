@@ -108,68 +108,28 @@ public class NeuralNetWorkModel implements Writable{
         classLabelsMap.readFields(in);
     }
 
-    /**
-     * 获得其隐藏层中每个结点的值，其值通过输入层得到的.
-     * 即aj = sum(wji * xi) i为输入层中结点的个数.
-     *注意，为了便于理解，同时也为了方便后续接口的实现.
-     * 这里features是原始特征向量的值，没有增加额外的偏置结点.
-     * @param features 特征向量.
-     * @return
-     */
-    public Vector hiddenUnitInput(Vector features){
-        Vector vector = new DenseVector(inputUnits + 1);
-        vector.set(0,1.0);
-        vector.viewPart(1,inputUnits).assign(features);
-        vector = firstLayerWeights.times(vector);
-        return vector;
+
+    public Vector forward(int layer,Vector insts){
+
+        Vector addBias = new DenseVector(insts.size() + 1);
+        addBias.set(0, 1);
+        for(int i = 0; i < insts.size(); i++)
+            addBias.set(i + 1,insts.get(i));
+        Vector result = null;
+        if(layer == 0)
+            result = firstLayerWeights.times(addBias);
+        else
+            result = secondLayerWeights.times(addBias);
+        return result.assign(Functions.SIGMOID);
     }
 
-    /**
-     * 返回其隐藏层中每个结点，经过其激活函数之后的结果.
-     * 激活函数默认为sigmoid函数.
-     * @param features 特征向量.
-     * @return
-     */
-    public Vector hiddenUnitActivate(Vector features){
-        return hiddenUnitInput(features).assign(new DoubleFunction() {
-            @Override
-            public double apply(double x) {
-                return 1.0/(1 + Math.exp(-x));
-            }
-        });
-    }
-
-    /**
-     * 返回每个输出层中结点的值.ak
-     * ak = sum(wkj * zj) j为隐藏层中结点的个数.
-     * @param features
-     * @return
-     */
-    public Vector outPutUnitInput(Vector features){
-
-        Vector activateVector = hiddenUnitActivate(features);
-        Vector vector = new DenseVector(M + 1);
-        vector.set(0,1.0);
-        vector.viewPart(1, M).assign(activateVector);
-        return secondLayerWeights.times(vector);
-    }
-    /**
-     * 注意输出层的激活函数是softMax的值.
-     * 也就是其最终结果的预测值.
-     * @param features
-     * @return 返回的是各个类别的可能概率值.
-     */
     public Vector predict(Vector features){
-        Vector outputUnitInputs = outPutUnitInput(features);
-        return outputUnitInputs.assign(new DoubleFunction() {
-            @Override
-            public double apply(double x) {
-                return 1.0/(1 + Math.exp(-x));
-            }
-        });
-//        outputUnitInputs.assign(Functions.EXP);
-//        return outputUnitInputs.divide(outputUnitInputs.zSum());
+
+        for(int layer = 1; layer < 3; ++layer)
+            features = forward(layer - 1,features);
+        return features;
     }
+
     /**
      * 返回预测概率值最大的那个类别.
      * @param features
@@ -190,7 +150,7 @@ public class NeuralNetWorkModel implements Writable{
         this.inputUnits = inputUnits;
         this.outputUnits = outputUnits;
         setM(M);
-        Random random = new Random(17);
+        Random random = new Random();
 
         classLabelsMap = new MapWritable();
         for(Map.Entry<String,Integer> entry : labelMap.entrySet()){
@@ -206,11 +166,9 @@ public class NeuralNetWorkModel implements Writable{
     private Matrix initalMatrix(int row,int column,Random random){
 
         Matrix matrix = new DenseMatrix(row, column);
-        for(int i = 0; i < row; i++){
-            Vector vector = new DenseVector(column);
-            for(int j = 0; j < column; j++)
-                vector.set(j,random.nextDouble() - 0.5);
-            matrix.assignRow(i, vector);
+        for(int i = 0; i < row; ++i){
+            for(int j = 0; j < column; ++j)
+                matrix.set(i,j, random.nextDouble() - 0.5);
         }
         return matrix;
     }

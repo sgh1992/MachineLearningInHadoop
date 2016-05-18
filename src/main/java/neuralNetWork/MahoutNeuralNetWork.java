@@ -42,6 +42,10 @@ public class MahoutNeuralNetWork {
         conf = new Configuration();
     }
 
+    public void setMoment(double moment){
+        mlp.setMomentumWeight(moment);
+    }
+
     public void setLearningRate(double learningRate){
         mlp.setLearningRate(learningRate);
     }
